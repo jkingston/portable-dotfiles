@@ -1,0 +1,56 @@
+# Environment shared by interactive and non-interactive Bash shells.
+export EDITOR=nvim
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$HOME/bin:$PATH"
+
+if [[ "$(uname -s)" == Darwin ]]; then
+  export SSH_AUTH_SOCK="$(getconf DARWIN_USER_TEMP_DIR)rbw-runtime/rbw/ssh-agent-socket"
+else
+  export SSH_AUTH_SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/rbw/ssh-agent-socket"
+fi
+
+[[ $- == *i* ]] || return
+
+# History
+HISTCONTROL=ignoreboth
+HISTSIZE=32768
+HISTFILESIZE=32768
+shopt -s histappend
+
+# Navigation
+alias ..='cd ..'
+alias ...='cd ../..'
+alias ....='cd ../../..'
+
+# Git
+alias gst='git status'
+alias gl='git pull'
+alias gp='git push'
+
+# Optional tools remain guarded so a partially provisioned machine still gets
+# a clean shell startup.
+if command -v bat >/dev/null 2>&1; then
+  alias cat='bat'
+fi
+
+if command -v eza >/dev/null 2>&1; then
+  alias ls='eza --icons=auto --git'
+  alias ll='eza --icons=auto --git -l'
+  alias la='eza --icons=auto --git -la'
+  alias lt='eza --icons=auto --git --tree'
+fi
+
+if command -v starship >/dev/null 2>&1; then
+  eval "$(starship init bash)"
+fi
+
+if command -v fzf >/dev/null 2>&1; then
+  eval "$(fzf --bash)"
+fi
+
+if command -v zoxide >/dev/null 2>&1; then
+  eval "$(zoxide init bash)"
+fi
+
+if command -v direnv >/dev/null 2>&1; then
+  eval "$(direnv hook bash)"
+fi

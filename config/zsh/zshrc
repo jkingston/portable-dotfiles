@@ -1,0 +1,49 @@
+# Environment
+export EDITOR=nvim
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$HOME/bin:$PATH"
+export SSH_AUTH_SOCK="$(getconf DARWIN_USER_TEMP_DIR)rbw-runtime/rbw/ssh-agent-socket"
+
+# Oh My Zsh is updated by setup-macos.sh.
+export ZSH="$HOME/.oh-my-zsh"
+ZSH_THEME=""
+plugins=(git)
+zstyle ':omz:update' mode disabled
+source "$ZSH/oh-my-zsh.sh"
+
+# Navigation
+alias ..='cd ..'
+alias ...='cd ../..'
+alias ....='cd ../../..'
+
+# Git
+alias gst='git status'
+alias gl='git pull'
+alias gp='git push'
+
+# Tool integrations
+if command -v bat >/dev/null 2>&1; then
+  alias cat='bat'
+fi
+
+if command -v eza >/dev/null 2>&1; then
+  alias ls='eza --icons=auto --git'
+  alias ll='eza --icons=auto --git -l'
+  alias la='eza --icons=auto --git -la'
+  alias lt='eza --icons=auto --git --tree'
+fi
+
+if command -v fzf >/dev/null 2>&1; then
+  source <(fzf --zsh)
+fi
+
+if command -v zoxide >/dev/null 2>&1; then
+  eval "$(zoxide init zsh)"
+fi
+
+if command -v direnv >/dev/null 2>&1; then
+  eval "$(direnv hook zsh)"
+fi
+
+if command -v starship >/dev/null 2>&1; then
+  eval "$(starship init zsh)"
+fi

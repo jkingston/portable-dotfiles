@@ -1,0 +1,4 @@
+Host *
+    AddKeysToAgent no
+
+Include ~/.ssh/config.local

@@ -1,0 +1,12 @@
+brew "bat"
+brew "direnv"
+brew "eza"
+brew "fzf"
+brew "git"
+brew "jq"
+brew "neovim"
+brew "rbw"
+brew "starship"
+brew "zoxide"
+
+cask "ghostty"

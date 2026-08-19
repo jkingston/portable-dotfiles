@@ -1,4 +1,4 @@
+Include ~/.ssh/config.d/*.conf
+
 Host *
     AddKeysToAgent no
-
-Include ~/.ssh/config.local

@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Create a Bitwarden Secure Note using rbw's agent and cached session."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import socket
+import ssl
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from typing import NoReturn
+
+
+def fail(message: str) -> NoReturn:
+    print(f"rbw-add-note: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def rbw_config() -> dict[str, object]:
+    result = subprocess.run(
+        ["rbw", "config", "show"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        fail(result.stderr.strip() or "failed to read rbw config")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        fail(f"invalid JSON from rbw config show: {error}")
+
+
+def profile_name() -> str:
+    profile = os.environ.get("RBW_PROFILE", "")
+    return f"rbw-{profile}" if profile else "rbw"
+
+
+def encode_server_name(server: str) -> str:
+    encoded = []
+    for byte in server.encode():
+        if byte < 32 or byte == 127 or byte in b"/%:":
+            encoded.append(f"%{byte:02X}")
+        else:
+            encoded.append(chr(byte))
+    return "".join(encoded)
+
+
+def database_path(config: dict[str, object]) -> Path:
+    email = config.get("email")
+    if not isinstance(email, str) or not email:
+        fail("rbw config has no email")
+    base_url = config.get("base_url")
+    server = base_url if isinstance(base_url, str) and base_url else "default"
+    filename = f"{encode_server_name(server)}:{email}.json"
+
+    cache_home = os.environ.get("XDG_CACHE_HOME")
+    if cache_home:
+        root = Path(cache_home)
+    elif sys.platform == "darwin":
+        root = Path.home() / "Library" / "Caches"
+    else:
+        root = Path.home() / ".cache"
+    return root / profile_name() / filename
+
+
+def agent_path() -> Path:
+    ssh_socket = os.environ.get("SSH_AUTH_SOCK")
+    if ssh_socket and Path(ssh_socket).name == "ssh-agent-socket":
+        return Path(ssh_socket).with_name("socket")
+
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        return Path(runtime) / profile_name() / "socket"
+    return Path("/tmp") / f"{profile_name()}-{os.getuid()}" / "socket"
+
+
+def encrypt(plaintext: str) -> str:
+    request = {
+        "environment": {"tty": None, "env_vars": []},
+        "action": {"type": "Encrypt", "plaintext": plaintext, "org_id": None},
+    }
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as agent:
+        try:
+            agent.connect(str(agent_path()))
+            agent.sendall(json.dumps(request, separators=(",", ":")).encode() + b"\n")
+            response = b""
+            while not response.endswith(b"\n"):
+                chunk = agent.recv(65536)
+                if not chunk:
+                    break
+                response += chunk
+        except OSError as error:
+            fail(f"failed to communicate with rbw-agent: {error}")
+
+    try:
+        message = json.loads(response)
+    except json.JSONDecodeError as error:
+        fail(f"invalid response from rbw-agent: {error}")
+    if message.get("type") == "Error":
+        fail(f"rbw-agent: {message.get('error', 'unknown error')}")
+    if message.get("type") != "Encrypt" or not isinstance(message.get("cipherstring"), str):
+        fail("unexpected response from rbw-agent")
+    return message["cipherstring"]
+
+
+def api_url(config: dict[str, object]) -> str:
+    base_url = config.get("base_url")
+    if not isinstance(base_url, str) or not base_url:
+        return "https://api.bitwarden.com"
+    clean_url = base_url.rstrip("/")
+    if clean_url == "https://api.bitwarden.eu":
+        return clean_url
+    return f"{clean_url}/api"
+
+
+def create_note(name: str, notes: str) -> None:
+    config = rbw_config()
+    path = database_path(config)
+    try:
+        database = json.loads(path.read_text())
+    except FileNotFoundError:
+        fail(f"rbw database not found: {path}")
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"failed to load rbw database: {error}")
+
+    access_token = database.get("access_token")
+    if not isinstance(access_token, str) or not access_token:
+        fail("rbw is not logged in")
+
+    payload = {
+        "type": 2,
+        "folderId": None,
+        "name": encrypt(name),
+        "notes": encrypt(notes),
+        "login": None,
+        "card": None,
+        "identity": None,
+        "secureNote": {},
+    }
+    request = urllib.request.Request(
+        f"{api_url(config)}/ciphers",
+        data=json.dumps(payload, separators=(",", ":")).encode(),
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "User-Agent": "rbw-add-note/0.1",
+        },
+        method="POST",
+    )
+    context = ssl.create_default_context()
+    certificate = config.get("client_cert_path")
+    if isinstance(certificate, str) and certificate:
+        context.load_cert_chain(certificate)
+
+    try:
+        with urllib.request.urlopen(request, context=context) as response:
+            if response.status != 200:
+                fail(f"Bitwarden returned HTTP {response.status}")
+    except urllib.error.HTTPError as error:
+        fail(f"Bitwarden returned HTTP {error.code}")
+    except urllib.error.URLError as error:
+        fail(f"Bitwarden request failed: {error.reason}")
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        fail(f"usage: {Path(sys.argv[0]).name} NAME")
+    notes = sys.stdin.read().rstrip("\n")
+    if not notes:
+        fail("refusing to create an empty Secure Note")
+    create_note(sys.argv[1], notes)
+
+
+if __name__ == "__main__":
+    main()

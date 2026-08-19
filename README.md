@@ -35,7 +35,7 @@ into this repository before running an installer.
 Repository-managed configuration and helper files are symlinked, so `git pull`
 updates the active Neovim, Ghostty, SSH, ssh-hosts, and Fedora systemd-agent
 configuration immediately. Bitwarden-derived files such as
-`~/.ssh/config.local` and `~/.ssh/rbw/*.pub` are generated regular files.
+`~/.ssh/config.d/rbw-*.conf` and `~/.ssh/rbw/*.pub` are generated regular files.
 
 Fedora's existing `.bashrc` is preserved; it loads the managed fragment through
 `~/.bashrc.d/50-dotfiles.sh`. macOS keeps its default zsh, installs or updates
@@ -89,15 +89,20 @@ agent. Private SSH keys must be stored as Bitwarden SSH Key items.
 
 ## Configure SSH hosts
 
-Create a Bitwarden item named `ssh/hosts` with a custom text field named
-`config`. Start with:
+Create one Bitwarden Secure Note per host with the helper:
 
 ```bash
-ssh-hosts template
+ssh-hosts add server server.example.com user ssh/keys/server
 ```
 
-Each entry in `keys` refers to a Bitwarden item field containing the matching
-public key. Synchronize and test with:
+This creates `ssh/hosts/server`; its note contains only the host metadata as
+JSON. The optional final argument sets a non-default port. Private SSH keys
+remain in separate Bitwarden SSH Key items. Synchronize and test with:
+
+`rbw-add-note` is a narrow companion used only to create Secure Notes. It asks
+the unlocked rbw agent to encrypt the item and submits it with rbw's cached
+session; access tokens and encryption keys are never passed as command-line
+arguments.
 
 ```bash
 rbw sync
@@ -106,9 +111,10 @@ ssh-hosts list
 ssh-hosts test server
 ```
 
-The generator writes only `~/.ssh/config.local` and public-key selector files
-under `~/.ssh/rbw`. Private keys remain in Bitwarden and are exposed only by
-rbw-agent.
+The generator writes one `~/.ssh/config.d/rbw-<alias>.conf` fragment per host
+and public-key selector files under `~/.ssh/rbw`. An empty set of host notes is
+valid and produces an empty generated configuration. Private keys remain in
+Bitwarden and are exposed only by rbw-agent.
 
 ## Notes
 

@@ -19,7 +19,7 @@ esac
 
 [[ "$(uname -s)" == Darwin ]] || { printf 'This installer supports macOS only.\n' >&2; exit 1; }
 
-brew_formulae=(bat direnv eza fzf git jq neovim rbw starship zoxide)
+brew_formulae=(bat direnv eza fzf git jq neovim python rbw starship zoxide)
 
 if (( dry_run )); then
   ui_title macOS

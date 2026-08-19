@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-config_item="${SSH_HOSTS_CONFIG_ITEM:-ssh/hosts}"
-config_field="${SSH_HOSTS_CONFIG_FIELD:-config}"
-local_config="${SSH_HOSTS_LOCAL_CONFIG:-$HOME/.ssh/config.local}"
-key_dir="${SSH_HOSTS_KEY_DIR:-$HOME/.ssh/rbw}"
+host_item_prefix="${SSH_HOSTS_ITEM_PREFIX:-ssh/hosts/}"
+ssh_dir="${SSH_HOSTS_SSH_DIR:-$HOME/.ssh}"
+config_dir="${SSH_HOSTS_CONFIG_DIR:-$ssh_dir/config.d}"
+key_dir="${SSH_HOSTS_KEY_DIR:-$ssh_dir/rbw}"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+note_helper="${RBW_ADD_NOTE:-$script_dir/rbw-add-note}"
 
 require() {
   command -v "$1" >/dev/null 2>&1 || { printf 'Missing command: %s\n' "$1" >&2; exit 1; }
@@ -22,125 +24,197 @@ agent_socket() {
 
 template() {
   cat <<'JSON'
-{
-  "hosts": [
-    {"alias":"server","hostname":"server.example.com","user":"user","key":"server","port":22}
-  ],
-  "keys": [
-    {"name":"server","item":"ssh/keys/server","field":"public key"}
-  ]
-}
+{"hostname":"server.example.com","user":"user","key_item":"ssh/keys/server","key_field":"public_key","port":22}
 JSON
 }
 
-fetch_config() {
+list_items() {
   require rbw
-  rbw get "$config_item" --field "$config_field"
+  rbw list --fields name,type | awk -F '\t' -v prefix="$host_item_prefix" '
+    $2 == "Note" && index($1, prefix) == 1 && length($1) > length(prefix) { print $1 }
+  '
 }
 
-validate_config() {
-  jq -e '
+fetch_host() {
+  rbw get "$1"
+}
+
+validate_host() {
+  local alias="$1"
+  jq -e --arg alias "$alias" '
     type == "object" and
-    (.hosts | type == "array" and length > 0) and
-    (.keys | type == "array") and
-    ([.hosts[].alias] | length == (unique | length)) and
-    ([.keys[].name] | length == (unique | length)) and
-    all(.hosts[];
-      (.alias | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]*$")) and
-      (.hostname | type == "string" and test("^[^\\n\\r[:space:]]+$")) and
-      (.user | type == "string" and test("^[A-Za-z0-9._-]+$")) and
-      (.key | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]*$")) and
-      ((.port // 22) | type == "number" and . >= 1 and . <= 65535) and
-      ((.extra // {}) | type == "object") and
-      all((.extra // {}) | to_entries[];
-        (.key | test("^[A-Za-z][A-Za-z0-9]+$")) and
-        (.value | type == "string" and test("^[^\\n\\r]*$")))) and
-    all(.keys[];
-      (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]*$")) and
-      (.item | type == "string" and test("^[^\\n\\r]+$")) and
-      (.field | type == "string" and test("^[^\\n\\r]+$"))) and
-    all(.hosts[].key as $key; any(.keys[].name; . == $key))
+    ($alias | test("^[A-Za-z0-9][A-Za-z0-9._-]*$")) and
+    (.hostname | type == "string" and test("^[^\\n\\r[:space:]]+$")) and
+    (.user | type == "string" and test("^[A-Za-z0-9._-]+$")) and
+    (.key_item | type == "string" and test("^[^\\n\\r]+$")) and
+    ((.key_field // "public_key") | type == "string" and test("^[^\\n\\r]+$")) and
+    ((.port // 22) | type == "number" and . >= 1 and . <= 65535 and floor == .) and
+    ((.extra // {}) | type == "object") and
+    all((.extra // {}) | to_entries[];
+      (.key | test("^[A-Za-z][A-Za-z0-9]+$")) and
+      (.value | type == "string" and test("^[^\\n\\r]*$")))
   ' >/dev/null
 }
 
-sync_hosts() {
+add_host() {
+  [[ $# -ge 4 && $# -le 5 ]] || {
+    printf 'Usage: ssh-hosts add ALIAS HOSTNAME USER KEY_ITEM [PORT]\n' >&2
+    exit 2
+  }
+
   require jq
+  require rbw
+  require ssh-keygen
+  [[ -x "$note_helper" ]] || {
+    printf 'Missing executable: %s\n' "$note_helper" >&2
+    exit 1
+  }
+
+  local alias="$1" hostname="$2" user="$3" key_item="$4" port="${5:-22}"
+  local item config existing key_tmp
+  item="${host_item_prefix}${alias}"
+  config="$(jq -cn \
+    --arg hostname "$hostname" \
+    --arg user "$user" \
+    --arg key_item "$key_item" \
+    --argjson port "$port" \
+    '{hostname:$hostname,user:$user,key_item:$key_item,key_field:"public_key",port:$port}')" || {
+      printf 'PORT must be an integer.\n' >&2
+      exit 2
+    }
+  validate_host "$alias" <<<"$config" || {
+    printf 'Invalid SSH host values.\n' >&2
+    exit 2
+  }
+
+  existing="$(rbw list --fields name)"
+  if grep -Fqx -- "$item" <<<"$existing"; then
+    printf 'Bitwarden item already exists: %s\n' "$item" >&2
+    exit 1
+  fi
+
+  key_tmp="$(mktemp)"
+  trap 'rm -f "$key_tmp"' RETURN
+  rbw get "$key_item" --field public_key >"$key_tmp"
+  ssh-keygen -l -f "$key_tmp" >/dev/null
+
+  rbw sync
+  printf '%s\n' "$config" | "$note_helper" "$item"
+  rbw sync
+  rm -f "$key_tmp"
+  trap - RETURN
+  printf 'Added Bitwarden Secure Note %s. Run ssh-hosts sync to generate SSH config.\n' "$item"
+}
+
+sync_hosts() {
+  require awk
+  require jq
+  require rbw
   require ssh
   require ssh-keygen
 
-  local config socket config_tmp staging name item field target
-  config="$(fetch_config)"
-  validate_config <<<"$config" || { printf 'Invalid SSH hosts JSON.\n' >&2; exit 1; }
+  local items socket staging config_staging key_staging item alias config
+  local hostname user key_item key_field port target config_target
+  items="$(list_items)"
   socket="$(agent_socket)"
 
-  install -d -m 700 "$HOME/.ssh" "$key_dir"
-  staging="$(mktemp -d "$HOME/.ssh/.rbw-keys.XXXXXX")"
-  config_tmp="$(mktemp "$HOME/.ssh/.config.local.XXXXXX")"
-  trap 'rm -rf "$staging" "$config_tmp"' RETURN
+  install -d -m 700 "$ssh_dir" "$config_dir" "$key_dir"
+  staging="$(mktemp -d "$ssh_dir/.rbw-hosts.XXXXXX")"
+  config_staging="$staging/config"
+  key_staging="$staging/keys"
+  install -d -m 700 "$config_staging" "$key_staging"
+  trap 'rm -rf "$staging"' RETURN
 
-  while IFS=$'\t' read -r name item field; do
-    target="$staging/$name.pub"
-    rbw get "$item" --field "$field" >"$target"
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    alias="${item#"$host_item_prefix"}"
+    config="$(fetch_host "$item")"
+    validate_host "$alias" <<<"$config" || {
+      printf 'Invalid SSH host JSON in Bitwarden item %s.\n' "$item" >&2
+      exit 1
+    }
+
+    hostname="$(jq -r '.hostname' <<<"$config")"
+    user="$(jq -r '.user' <<<"$config")"
+    key_item="$(jq -r '.key_item' <<<"$config")"
+    key_field="$(jq -r '.key_field // "public_key"' <<<"$config")"
+    port="$(jq -r '.port // 22' <<<"$config")"
+
+    target="$key_staging/$alias.pub"
+    rbw get "$key_item" --field "$key_field" >"$target"
     ssh-keygen -l -f "$target" >/dev/null
     chmod 600 "$target"
-  done < <(jq -r '.keys[] | [.name, .item, .field] | @tsv' <<<"$config")
 
-  {
-    printf '# Generated by ssh-hosts; edit Bitwarden item %s, then resync.\n\n' "$config_item"
-    jq -r --arg socket "$socket" '
-      .hosts[] |
-      "Host \(.alias)\n" +
-      "    HostName \(.hostname)\n" +
-      "    User \(.user)\n" +
-      "    Port \(.port // 22)\n" +
-      "    IdentityAgent \($socket)\n" +
-      "    IdentityFile ~/.ssh/rbw/\(.key).pub\n" +
-      "    IdentitiesOnly yes\n" +
-      ((.extra // {}) | to_entries | map("    \(.key) \(.value)\n") | join("")) + "\n"
-    ' <<<"$config"
-  } >"$config_tmp"
-  chmod 600 "$config_tmp"
+    config_target="$config_staging/rbw-$alias.conf"
+    {
+      printf '# Generated by ssh-hosts from Bitwarden item %s; do not edit.\n' "$item"
+      printf 'Host %s\n' "$alias"
+      printf '    HostName %s\n' "$hostname"
+      printf '    User %s\n' "$user"
+      printf '    Port %s\n' "$port"
+      printf '    IdentityAgent %s\n' "$socket"
+      printf '    IdentityFile ~/.ssh/rbw/%s.pub\n' "$alias"
+      printf '    IdentitiesOnly yes\n'
+      jq -r '(.extra // {}) | to_entries[] | "    \(.key) \(.value)"' <<<"$config"
+      printf '\n'
+    } >"$config_target"
+    chmod 600 "$config_target"
+    ssh -F "$config_target" -G "$alias" >/dev/null
+  done <<<"$items"
 
-  # Parse every generated stanza before changing the live configuration.
-  while IFS= read -r alias; do
-    ssh -F "$config_tmp" -G "$alias" >/dev/null
-  done < <(jq -r '.hosts[].alias' <<<"$config")
-
+  find "$config_dir" -maxdepth 1 -type f -name 'rbw-*.conf' -delete
   find "$key_dir" -maxdepth 1 -type f -name '*.pub' -delete
-  find "$staging" -maxdepth 1 -type f -name '*.pub' -exec mv {} "$key_dir/" \;
-  mv "$config_tmp" "$local_config"
-  rmdir "$staging"
+  find "$config_staging" -maxdepth 1 -type f -name 'rbw-*.conf' -exec mv {} "$config_dir/" \;
+  find "$key_staging" -maxdepth 1 -type f -name '*.pub' -exec mv {} "$key_dir/" \;
+  rmdir "$config_staging" "$key_staging" "$staging"
   trap - RETURN
-  printf 'Updated %s and %s.\n' "$local_config" "$key_dir"
+
+  if [[ -z "$items" ]]; then
+    printf 'No Bitwarden items matching %s*; SSH host configuration is empty.\n' "$host_item_prefix"
+  else
+    printf 'Updated %s and %s from Bitwarden.\n' "$config_dir" "$key_dir"
+  fi
 }
 
 list_hosts() {
-  local config
-  config="$(fetch_config)"
-  validate_config <<<"$config"
-  jq -r '.hosts[] | [.alias, (.user + "@" + .hostname), .key] | @tsv' <<<"$config"
+  require jq
+
+  local item alias config
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    alias="${item#"$host_item_prefix"}"
+    config="$(fetch_host "$item")"
+    validate_host "$alias" <<<"$config" || {
+      printf 'Invalid SSH host JSON in Bitwarden item %s.\n' "$item" >&2
+      exit 1
+    }
+    jq -r --arg alias "$alias" '[$alias, (.user + "@" + .hostname), .key_item] | @tsv' <<<"$config"
+  done < <(list_items)
 }
 
 test_host() {
   [[ -n "${1:-}" ]] || { printf 'Usage: ssh-hosts test HOST\n' >&2; exit 2; }
-  ssh -o BatchMode=yes -T "$1"
+  ssh -n -o BatchMode=yes -T "$1" true
 }
 
 usage() {
   cat <<EOF
 Usage: ssh-hosts COMMAND
 
-  sync       Generate SSH config and public-key selectors from Bitwarden
+  add ALIAS HOSTNAME USER KEY_ITEM [PORT]
+             Create a Bitwarden Secure Note for one host
+  sync       Generate SSH fragments and public-key selectors from Bitwarden
   list       List configured hosts
   test HOST  Test non-interactive authentication
-  template   Print example Bitwarden JSON
+  template   Print the JSON stored in each Secure Note
 
-Bitwarden source defaults to item '$config_item', field '$config_field'.
-Override it with SSH_HOSTS_CONFIG_ITEM and SSH_HOSTS_CONFIG_FIELD.
+Bitwarden host items default to '${host_item_prefix}<alias>'. Override the
+prefix with SSH_HOSTS_ITEM_PREFIX.
 EOF
 }
 
 case "${1:-}" in
+  add) shift; add_host "$@" ;;
   sync) sync_hosts ;;
   list) list_hosts ;;
   test) shift; test_host "${1:-}" ;;

@@ -75,6 +75,7 @@ describe_shared_links() {
   describe_link "$repo_dir/config/ghostty" "$config_home/ghostty"
   describe_link "$repo_dir/config/starship" "$config_home/starship"
   describe_link "$repo_dir/bin/ssh-hosts" "$HOME/.local/bin/ssh-hosts"
+  describe_link "$repo_dir/bin/rbw-add-note" "$HOME/.local/bin/rbw-add-note"
   describe_link "$repo_dir/config/ssh/config" "$HOME/.ssh/config"
 }
 
@@ -150,5 +151,6 @@ link_shared_config() {
   link_path "$repo_dir/config/ghostty" "$config_home/ghostty" || true
   link_path "$repo_dir/config/starship" "$config_home/starship" || true
   link_path "$repo_dir/bin/ssh-hosts" "$HOME/.local/bin/ssh-hosts" || true
+  link_path "$repo_dir/bin/rbw-add-note" "$HOME/.local/bin/rbw-add-note" || true
   link_path "$repo_dir/config/ssh/config" "$HOME/.ssh/config" || true
 }

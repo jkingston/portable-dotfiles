@@ -24,7 +24,7 @@ esac
 
 fedora_packages=(
   bat curl direnv dnf-plugins-core eza flatpak fzf gcc gh git jq neovim
-  openssh-clients pinentry util-linux wl-clipboard zoxide
+  openssh-clients pinentry python3 util-linux wl-clipboard zoxide
 )
 tailscale_repo_url='https://pkgs.tailscale.com/stable/fedora/tailscale.repo'
 tailscale_qs_uuid='tailscale-gnome-qs@tailscale-qs.github.io'
